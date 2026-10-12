@@ -20,6 +20,8 @@ app.use(express.json({ limit: "20kb" }));
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+// Agar primary model busy (503/timeout) rahe toh ye model auto-try hota hai
+const GEMINI_MODEL_FALLBACK = process.env.GEMINI_MODEL_FALLBACK || "";
 
 // AI tutor instructions
 const SYSTEM_PROMPT = `
@@ -65,21 +67,62 @@ app.get("/api/history", async (req, res) => {
     }
 });
 
-// Gemini API call with retry — 503/429 spikes usually temporary hote hain
-async function callGeminiWithRetry(apiUrl, payload, attempts = 3) {
+// Gemini API call with retry — 503/429/timeout spikes usually temporary hote hain
+// Har attempt ka apna 25s timeout, poori call ka max 60s budget
+async function callGeminiWithRetry(model, payload, attempts = 3) {
+    const PER_ATTEMPT_TIMEOUT_MS = 25000;
+    const TOTAL_BUDGET_MS = 60000;
+    const apiUrl =
+        "https://generativelanguage.googleapis.com/v1beta/models/" +
+        model +
+        ":generateContent";
+    const startedAt = Date.now();
+
     let lastStatus = 0;
     let lastResult = {};
+    let lastTimedOut = false;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
-        const apiResponse = await fetch(apiUrl, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
-            },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(30000)
-        });
+        const budgetLeft = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+
+        // Agar next attempt ke liye time hi nahi bacha, ruk jao
+        if (attempt > 1 && budgetLeft < PER_ATTEMPT_TIMEOUT_MS) {
+            break;
+        }
+
+        let apiResponse = null;
+        lastTimedOut = false;
+
+        try {
+            apiResponse = await fetch(apiUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": GEMINI_API_KEY
+                },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(PER_ATTEMPT_TIMEOUT_MS)
+            });
+        } catch (fetchError) {
+            // Timeout ya network glitch — temporary ho sakta hai, retry karo
+            const isTimeout =
+                fetchError.name === "TimeoutError" || fetchError.name === "AbortError";
+
+            lastTimedOut = isTimeout;
+
+            if (attempt === attempts) {
+                throw fetchError;
+            }
+
+            const waitMs = attempt * 2000;
+            console.warn(
+                (isTimeout ? "Gemini timeout" : "Gemini network error: " + fetchError.message) +
+                " (attempt " + attempt + "/" + attempts +
+                ") — " + (waitMs / 1000) + " sec baad retry kar raha hoon..."
+            );
+            await new Promise(resolve => setTimeout(resolve, waitMs));
+            continue;
+        }
 
         if (apiResponse.ok) {
             return {
@@ -93,7 +136,7 @@ async function callGeminiWithRetry(apiUrl, payload, attempts = 3) {
         lastResult = await apiResponse.json().catch(() => ({}));
 
         // Sirf temporary errors (503 high demand / 429 rate limit) par retry
-        const retryable = apiResponse.status === 503 || apiResponse.status === 429;
+        const retryable = lastStatus === 503 || lastStatus === 429;
         if (!retryable || attempt === attempts) {
             break;
         }
@@ -106,7 +149,13 @@ async function callGeminiWithRetry(apiUrl, payload, attempts = 3) {
         await new Promise(resolve => setTimeout(resolve, waitMs));
     }
 
-    return { ok: false, status: lastStatus, result: lastResult };
+    return {
+        ok: false,
+        status: lastStatus,
+        result: lastResult,
+        retryableFailure:
+            lastTimedOut || lastStatus === 503 || lastStatus === 429
+    };
 }
 
 // AI chat endpoint
@@ -137,13 +186,7 @@ app.post("/api/chat", async (req, res) => {
             });
         }
 
-        // Build API URL without template-literal syntax issues
-        const apiUrl =
-            "https://generativelanguage.googleapis.com/v1beta/models/" +
-            GEMINI_MODEL +
-            ":generateContent";
-
-        // Send request to Gemini (503/429 par automatic retry ke saath)
+        // Gemini request ka payload
         const payload = {
             systemInstruction: {
                 parts: [
@@ -164,7 +207,27 @@ app.post("/api/chat", async (req, res) => {
             }
         };
 
-        const apiCall = await callGeminiWithRetry(apiUrl, payload);
+        // Primary model try karo (retry ke saath); function andar URL build karta hai
+        let apiCall = await callGeminiWithRetry(GEMINI_MODEL, payload);
+
+        // Primary model busy/fail (503/429/timeout) hua toh fallback model try karo
+        if (
+            !apiCall.ok &&
+            apiCall.retryableFailure &&
+            GEMINI_MODEL_FALLBACK &&
+            GEMINI_MODEL_FALLBACK !== GEMINI_MODEL
+        ) {
+            console.warn(
+                "Primary model (" + GEMINI_MODEL + ") busy/fail — fallback (" +
+                GEMINI_MODEL_FALLBACK + ") try kar raha hoon..."
+            );
+
+            apiCall = await callGeminiWithRetry(GEMINI_MODEL_FALLBACK, payload);
+
+            if (apiCall.ok) {
+                console.log("Fallback model se jawab mil gaya.");
+            }
+        }
 
         // Handle Gemini API errors
         if (!apiCall.ok) {
@@ -228,7 +291,7 @@ app.post("/api/chat", async (req, res) => {
         if (error.name === "TimeoutError" || error.name === "AbortError") {
             return res.status(504).json({
                 success: false,
-                error: "The AI request timed out. Please try again."
+                error: "AI ka jawab waqt par nahi aaya. 1-2 minute baad dobara try karo."
             });
         }
 
