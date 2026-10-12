@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Secrets — GitHub par kabhi mat bhejo
+code.env
+.env
+*.pem
+
+# Logs
+npm-debug.log*
+
+# Temporary / test files
+status.txt
+winget_log*.txt
+winget_err*.txt
+server_test.log
+server_test.err.log
+mysql-init.txt
+gitcheck.txt
+curl_done.txt
+
+# Machine-specific script (local MySQL password rakhta hai)
+reset_root_password.bat
