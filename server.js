@@ -65,6 +65,50 @@ app.get("/api/history", async (req, res) => {
     }
 });
 
+// Gemini API call with retry — 503/429 spikes usually temporary hote hain
+async function callGeminiWithRetry(apiUrl, payload, attempts = 3) {
+    let lastStatus = 0;
+    let lastResult = {};
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        const apiResponse = await fetch(apiUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(30000)
+        });
+
+        if (apiResponse.ok) {
+            return {
+                ok: true,
+                status: apiResponse.status,
+                result: await apiResponse.json()
+            };
+        }
+
+        lastStatus = apiResponse.status;
+        lastResult = await apiResponse.json().catch(() => ({}));
+
+        // Sirf temporary errors (503 high demand / 429 rate limit) par retry
+        const retryable = apiResponse.status === 503 || apiResponse.status === 429;
+        if (!retryable || attempt === attempts) {
+            break;
+        }
+
+        const waitMs = attempt * 2000;
+        console.warn(
+            "Gemini " + lastStatus + " (attempt " + attempt + "/" + attempts +
+            ") — " + (waitMs / 1000) + " sec baad retry kar raha hoon..."
+        );
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+
+    return { ok: false, status: lastStatus, result: lastResult };
+}
+
 // AI chat endpoint
 app.post("/api/chat", async (req, res) => {
     try {
@@ -99,50 +143,51 @@ app.post("/api/chat", async (req, res) => {
             GEMINI_MODEL +
             ":generateContent";
 
-        // Send request to Gemini
-        const apiResponse = await fetch(apiUrl, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
+        // Send request to Gemini (503/429 par automatic retry ke saath)
+        const payload = {
+            systemInstruction: {
+                parts: [
+                    { text: SYSTEM_PROMPT }
+                ]
             },
-            body: JSON.stringify({
-                systemInstruction: {
+            contents: [
+                {
+                    role: "user",
                     parts: [
-                        { text: SYSTEM_PROMPT }
+                        { text: message.trim() }
                     ]
-                },
-                contents: [
-                    {
-                        role: "user",
-                        parts: [
-                            { text: message.trim() }
-                        ]
-                    }
-                ],
-                generationConfig: {
-                    temperature: 0.7,
-                    maxOutputTokens: 2048
                 }
-            }),
-            signal: AbortSignal.timeout(30000)
-        });
+            ],
+            generationConfig: {
+                temperature: 0.7,
+                maxOutputTokens: 2048
+            }
+        };
 
-        const result = await apiResponse.json();
+        const apiCall = await callGeminiWithRetry(apiUrl, payload);
 
         // Handle Gemini API errors
-        if (!apiResponse.ok) {
+        if (!apiCall.ok) {
             console.error(
                 "Gemini API error:",
-                apiResponse.status,
-                result.error?.message || "Unknown API error"
+                apiCall.status,
+                apiCall.result.error?.message || "Unknown API error"
             );
+
+            if (apiCall.status === 503 || apiCall.status === 429) {
+                return res.status(503).json({
+                    success: false,
+                    error: "AI service par abhi bahut load hai. 2-3 minute baad dobara try karo."
+                });
+            }
 
             return res.status(502).json({
                 success: false,
                 error: "The AI service could not answer right now. Please try again."
             });
         }
+
+        const result = apiCall.result;
 
         // Extract AI response
         const reply = result.candidates?.[0]?.content?.parts
