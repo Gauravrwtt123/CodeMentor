@@ -1,0 +1,8 @@
+target/
+src/main/resources/db.properties
+.env
+code.env
+node_modules/
+*.log
+.idea/
+.vscode/

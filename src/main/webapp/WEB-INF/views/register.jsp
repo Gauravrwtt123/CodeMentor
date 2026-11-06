@@ -1,0 +1,4 @@
+<%@ page contentType="text/html;charset=UTF-8" %>\n<%@ taglib prefix="c" uri="jakarta.tags.core" %>
+<!doctype html><html><head><meta charset="utf-8"><title>Register - CodeMentor</title><link rel="stylesheet" href="${pageContext.request.contextPath}/assets/style.css"></head><body><main class="card"><h1>Create account</h1>
+<% if(request.getAttribute("error")!=null){ %><p class="error"><c:out value="${error}"/></p><% } %>
+<form method="post" action="${pageContext.request.contextPath}/register"><label>Name</label><input name="name" required><label>Email</label><input type="email" name="email" required><label>Password (minimum 8 characters)</label><input type="password" name="password" minlength="8" required><button>Register</button></form><p><a href="${pageContext.request.contextPath}/login">Back to login</a></p></main></body></html>

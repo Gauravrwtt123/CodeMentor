@@ -1,0 +1,5 @@
+# Copy this file to db.properties and enter your own MySQL credentials.
+# Do not commit db.properties to GitHub.
+db.url=jdbc:mysql://localhost:3306/codementor?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Kolkata
+db.username=root
+db.password=YOUR_MYSQL_PASSWORD
